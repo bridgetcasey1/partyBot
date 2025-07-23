@@ -1,106 +1,75 @@
 /*
  * partyBot.c
  *
- * Created: 17/09/2021 11:58:37 AM
- * Author : s4319233
+ * Created: 06/01/2025 03:56:27 PM
+ * Author : gatorBots
  */ 
 
 #include "light_ws2812.h"
 #include "serial_communication.h"
+#include "macros.h"
 #include <avr/io.h>
 #include <stdbool.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
-// Constants
-#define F_CPU 8000000 // Clock speed
-#define TIMER_1_PERIOD 0.05 // in seconds
-#define TIMER_2_PERIOD 0.05 // in seconds
-#define AUTO_MODE 0
-#define MANUAL_MODE 1
-#define THRESHOLD_VALUE 500
-#define SIDE_THRESHOLD_VALUE 510
-#define MAX_TURN_COUNT 5
-#define NUMBER_LEDS 32
+#define F_CPU 8000000 // clock speed
 
-#define SLOWEST_SPEED 1
-#define SLOW_SPEED 2
-#define MID_SPEED 3
-#define FAST_SPEED 4
-#define FASTEST_SPEED 5
-
-#define RIGHT_SLOWEST_SPEED_PWM 210
-#define LEFT_SLOWEST_SPEED_PWM 170
-#define RIGHT_SLOW_SPEED_PWM 219
-#define LEFT_SLOW_SPEED_PWM 177
-#define RIGHT_MID_SPEED_PWM 225
-#define LEFT_MID_SPEED_PWM 207
-#define RIGHT_FAST_SPEED_PWM 240
-#define LEFT_FAST_SPEED_PWM 194
-#define RIGHT_FASTEST_SPEED_PWM 255
-#define LEFT_FASTEST_SPEED_PWM 207
-
-#define WHITE 0 
-#define RED 1
-#define ORANGE 2
-#define YELLOW 3
-#define GREEN 4
-#define LIGHTBLUE 5
-#define BLUE 6
-#define VIOLET 7 
-#define RAINBOW 8 
-
-// Global variables 
+// Movement variables
 int current_mode = AUTO_MODE;
 int current_speed = MID_SPEED;
-bool motors_on = false; 
-int solenoid_counter = 0; 
-bool fire = false; 
-struct cRGB leds[NUMBER_LEDS]; // Array for storing LED colours
-int previous_colours[NUMBER_LEDS]; 
-bool slow_flash_leds = false; 
-bool flash_leds = false; 
-bool fast_flash_leds = false; 
-bool leds_off = true; 
-bool leds_just_flashed = true; 
-bool rainbow_boogie = false; 
-int led_counter = 0; 
-int rainbow_tracker = 0; 
-int current_colour = WHITE; 
-bool receivingMessage = false; 
-char message[50];
-int messageLength = 0; 
-bool switchOn = false; 
-
-// Auto mode global variables 
-bool reversing = false;  
-bool turning_left = false;
-bool turning_right = false;
-bool moving_forward = false;
-bool stopped = false;
-bool obstacle_detected = false;
-bool time_to_reverse = false;
-bool time_to_turn = false;
+int movement_mode = STOPPED;
 int reversing_counter = 0;
-int turning_left_counter = 0;
-int turning_right_counter = 0;
-int stopped_counter = 0; 
+int turning_counter = 0;
+int stopped_counter = 0;
+bool forward_mvmt_disabled = false;
+bool obstacle_just_detected = false; 
+bool partyBot_switched_off = false;
 
-// Manual mode global variables 
-bool man_moving_forward = false;
-bool man_turning_left = false; 
-bool man_turning_right = false; 
-bool man_reversing = false; 
-bool partyBot_dancing = false; 
+// Solenoid variables
+int solenoid_counter = 0;
+bool fire_solenoid = false;
 
-// Set up timer 1 with 1s period and interrupt on compare match A.
-void initialise_timer_1(void) {
+// LED variables
+struct cRGB leds[NUMBER_LEDS]; // Array for storing LED colours
+struct cRGB ring_leds[NUM_RING_LEDS];
+int previous_led_colours[NUMBER_LEDS]; // For rainbow boogie
+int previous_ring_led_colours[NUM_RING_LEDS];
+int led_mode = OFF;
+int current_led_colour = NO_COLOUR;
+int pre_obstacle_led_mode = OFF;
+int pre_obstacle_led_colour = NO_COLOUR;
+bool leds_just_flashed = false;
+int led_counter = 0;
+bool lcd_in_sync = true; 
+
+const struct cRGB off = {.r = 0, .g = 0, .b = 0};
+const struct cRGB white = {.r = 15, .g = 15, .b = 15};
+const struct cRGB red = {.r = 15, .g = 0, .b = 0};
+const struct cRGB orange = {.r = 20, .g = 4, .b = 0};
+const struct cRGB yellow = {.r = 14, .g = 7, .b = 0};
+const struct cRGB green = {.r = 0, .g = 15, .b = 0};
+const struct cRGB light_blue = {.r = 0, .g = 6, .b = 15};
+const struct cRGB blue = {.r = 0, .g = 0, .b = 15};
+const struct cRGB violet = {.r = 6, .g = 0, .b = 15};
+const struct cRGB pink = {.r = 15, .g = 5, .b = 3};
+
+// LCD message variables
+bool receiving_message = false;
+char message[50];
+int message_length = 0;
+
+// Set up timer 1 with interrupt on compare match A
+void init_timer_1(void) {
+
+	// Set the timer mode to CTC
+	TCCR1B |= (1 << WGM12);
 	
 	// Set prescalar to 64
 	TCCR1B |= (1 << CS11) | (1 << CS10);
 	int prescalar = 64;
 	
-	// Set period to 0.05s (set compare value A)
+	// Set period (compare value A)
 	OCR1A = TIMER_1_PERIOD * (F_CPU/prescalar) - 1;
 	
 	// Set counter to 0
@@ -108,10 +77,13 @@ void initialise_timer_1(void) {
 	
 	// Set interrupt on compare match A
 	TIMSK1 |= (1 << OCIE1A);
+
+	// Enable interrupts
+	sei(); 
 }
 
-// Set up timer 2 with 500ms period and interrupt on compare match A.
-void initialise_timer_2(void) {
+// Set up timer 2 with interrupt on compare match A
+void init_timer_2(void) {
 	
 	// Set the timer mode to CTC
 	TCCR2A |= (1 << WGM21);
@@ -120,8 +92,8 @@ void initialise_timer_2(void) {
 	TCCR2B |= (1 << CS20) |(1 << CS21) | (1 << CS22);
 	int prescalar = 1024;
 	
-	// Set period to 500ms (set compare value A)
-	OCR2A = TIMER_2_PERIOD * (F_CPU/prescalar) - 1;
+	// Set period (compare value A)
+	OCR2A = TIMER_2_PERIOD * F_CPU / (prescalar * 1000) - 1;
 	
 	// Set counter to 0
 	TCNT2 = 0;
@@ -131,36 +103,33 @@ void initialise_timer_2(void) {
 }
 
 // Set up distance sensors 
-void setup_distance_sensors(void) {
-	
-	// Configure sensor pins as inputs
-	DDRC &= ~((1 << DDC0) | (1 << DDC1) | (1 << DDC2) | (1 << DDC3));
-	
-	// ADC prescalar of 128 
-	ADCSRA |= (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+void init_distance_sensors(void) {
 	
 	// Configure ADC to use AVCC as reference
-	ADMUX |= (1 << REFS0);
+	ADMUX = (1 << REFS0);
+	
+	// Configure for 8 bit results
+	ADMUX |= (1 << ADLAR);
+	
+	// Set ADC prescalar to 128 
+	ADCSRA |= (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 	
 	// Enable ADC
 	ADCSRA |= (1 << ADEN);
-
-	// Enable interrupts (for processing IR sensor data) 
-	sei(); 
 }
 
-// Set up motor control pins and PWM using timer 0 for speed control.
-void setup_motor_control(void) {
+// Set up motor control pins and PWM using timer 0 for speed control
+void init_motor_control(void) {
 	
-	// Configure motor A pins as outputs 
-	DDRB |= (1 << DDB2);
-	DDRD |= (1 << DDD7);
-	DDRD |= (1 << DDD6);
+	// Configure motor 1 pins as outputs 
+	M1_DDR |= (1 << M1_EN_PIN);
+	M1_DDR |= (1 << M1_FWD_PIN);
+	M1_DDR |= (1 << M1_BWD_PIN);
 
-	// Configure motor B pins as outputs 
-	DDRB |= (1 << DDB0);
-	DDRD |= (1 << DDD4);
-	DDRD |= (1 << DDD5);
+	// Configure motor 2 pins as outputs 
+	M2_DDR |= (1 << M2_EN_PIN);
+	M2_DDR |= (1 << M2_FWD_PIN);
+	M2_BWD_DDR |= (1 << M2_BWD_PIN);
 
 	// Set up non-inverting PWM mode using timer 0 
 	TCCR0A |= (1<<COM0A1) | (1<<COM0B1) | (1<<WGM01) | (1<<WGM00);
@@ -172,101 +141,366 @@ void setup_motor_control(void) {
 	OCR0B = 0; 
 }
 
-// Read value from rear sensor
-uint16_t get_rear_sensor_value(void) {
+// Set LEDs to rainbow
+void set_leds_rainbow(void) {
 	
-	// Zero ADMUX bits
-	ADMUX &= 0xF0;
+	// Setting LED strip
+	for (int led = 0; led < NUMBER_LEDS; led++) {
+		if ((led % NUM_COLOURS) == RED) {
+			leds[led] = red;
+		} else if ((led % NUM_COLOURS) == ORANGE) {
+			leds[led] = orange;
+		} else if ((led % NUM_COLOURS) == YELLOW) {
+			leds[led] = yellow;
+		} else if ((led % NUM_COLOURS) == GREEN) {
+			leds[led] = green;
+		} else if ((led % NUM_COLOURS) == LIGHTBLUE) {
+			leds[led] = light_blue;
+		} else if ((led % NUM_COLOURS) == BLUE) {
+			leds[led] = blue;
+		} else if ((led % NUM_COLOURS) == VIOLET) {
+			leds[led] = violet;
+		} else if ((led % NUM_COLOURS) == PINK) {
+			leds[led] = pink;
+		}
+	}
+	ws2812SetLeds(leds, NUMBER_LEDS);
 	
-	// Select ADC2 as ADC input
-	ADMUX |= (0 << MUX3) | (0 << MUX2) |(1 << MUX1) | (0 << MUX0);
+	// Setting LED rings
+	for (int led = 0; led < NUM_RING_LEDS; led++) {
+		if ((led % NUM_COLOURS) == RED) {
+			ring_leds[led] = red;
+		} else if ((led % NUM_COLOURS) == ORANGE) {
+			ring_leds[led] = orange;
+		} else if ((led % NUM_COLOURS) == YELLOW) {
+			ring_leds[led] = yellow;
+		} else if ((led % NUM_COLOURS) == GREEN) {
+			ring_leds[led] = green;
+		} else if ((led % NUM_COLOURS) == LIGHTBLUE) {
+			ring_leds[led] = light_blue;
+		} else if ((led % NUM_COLOURS) == BLUE) {
+			ring_leds[led] = blue;
+		} else if ((led % NUM_COLOURS) == VIOLET) {
+			ring_leds[led] = violet;
+		} else if ((led % NUM_COLOURS) == PINK) {
+			ring_leds[led] = pink;
+		}
+	}
+	ws2812SetLedsPin(ring_leds, NUM_RING_LEDS, _BV(ws2812Pin2));
+}
+
+// Set LEDs to move along one spot
+void set_leds_rainbow_boogie(void) {
 	
-	// Start an ADC conversion by setting ADSC bit (bit 6)
-	ADCSRA |= (1 << ADSC);
+	// Setting LED strip
+	for (int led = 0; led < NUMBER_LEDS; led++) {
+		if (previous_led_colours[led] == RED) {
+			leds[led] = orange;
+			previous_led_colours[led] = ORANGE;
+		} else if (previous_led_colours[led] == ORANGE) {
+			leds[led] = yellow;
+			previous_led_colours[led] = YELLOW;
+		} else if (previous_led_colours[led] == YELLOW) {
+			leds[led] = green;
+			previous_led_colours[led] = GREEN;
+		} else if (previous_led_colours[led] == GREEN) {
+			leds[led] = light_blue;
+			previous_led_colours[led] = LIGHTBLUE;
+		} else if (previous_led_colours[led] == LIGHTBLUE) {
+			leds[led] = blue;
+			previous_led_colours[led] = BLUE;
+		} else if (previous_led_colours[led] == BLUE) {
+			leds[led] = violet;
+			previous_led_colours[led] = VIOLET;
+		} else if (previous_led_colours[led] == VIOLET) {
+			leds[led] = pink;
+			previous_led_colours[led] = PINK;
+		} else if (previous_led_colours[led] == PINK) {
+			leds[led] = red;
+			previous_led_colours[led] = RED;
+		}
+	}
+	ws2812SetLeds(leds, NUMBER_LEDS);
+	
+	// Setting LED rings
+	for (int led = 0; led < NUM_RING_LEDS; led++) {
+		if (previous_ring_led_colours[led] == RED) {
+			ring_leds[led] = orange;
+			previous_ring_led_colours[led] = ORANGE;
+		} else if (previous_ring_led_colours[led] == ORANGE) {
+			ring_leds[led] = yellow;
+			previous_ring_led_colours[led] = YELLOW;
+		} else if (previous_ring_led_colours[led] == YELLOW) {
+			ring_leds[led] = green;
+			previous_ring_led_colours[led] = GREEN;
+		} else if (previous_ring_led_colours[led] == GREEN) {
+			ring_leds[led] = light_blue;
+			previous_ring_led_colours[led] = LIGHTBLUE;
+		} else if (previous_ring_led_colours[led] == LIGHTBLUE) {
+			ring_leds[led] = blue;
+			previous_ring_led_colours[led] = BLUE;
+		} else if (previous_ring_led_colours[led] == BLUE) {
+			ring_leds[led] = violet;
+			previous_ring_led_colours[led] = VIOLET;
+		} else if (previous_ring_led_colours[led] == VIOLET) {
+			ring_leds[led] = pink;
+			previous_ring_led_colours[led] = PINK;
+		} else if (previous_ring_led_colours[led] == PINK) {
+			ring_leds[led] = red;
+			previous_ring_led_colours[led] = RED;
+		}
+	}
+	ws2812SetLedsPin(ring_leds, NUM_RING_LEDS, _BV(ws2812Pin2));
+}
+
+// Reset rainbow boogie colour array
+void reset_rainbow_boogie_array(void) {
+	
+	// Resetting LED strip
+	for (int led = 0; led < NUMBER_LEDS; led++) {
+		if ((led % NUM_COLOURS) == RED) {
+			previous_led_colours[led] = RED;
+			leds[led] = red;
+		} else if ((led % NUM_COLOURS) == ORANGE) {
+			previous_led_colours[led] = ORANGE;
+			leds[led] = orange;
+		} else if ((led % NUM_COLOURS) == YELLOW) {
+			previous_led_colours[led] = YELLOW;
+			leds[led] = yellow;
+		} else if ((led % NUM_COLOURS) == GREEN) {
+			previous_led_colours[led] = GREEN;
+			leds[led] = green;
+		} else if ((led % NUM_COLOURS) == LIGHTBLUE) {
+			previous_led_colours[led] = LIGHTBLUE;
+			leds[led] = light_blue;
+		} else if ((led % NUM_COLOURS) == BLUE) {
+			previous_led_colours[led] = BLUE;
+			leds[led] = blue;
+		} else if ((led % NUM_COLOURS) == VIOLET) {
+			previous_led_colours[led] = VIOLET;
+			leds[led] = violet;
+		} else if ((led % NUM_COLOURS) == PINK) {
+			previous_led_colours[led] = PINK;
+			leds[led] = pink;
+		}
+	}
+	ws2812SetLeds(leds, NUMBER_LEDS);
+	
+	// Resetting LED rings
+	for (int led = 0; led < NUM_RING_LEDS; led++) {
+		if ((led % NUM_COLOURS) == RED) {
+			previous_ring_led_colours[led] = RED;
+			ring_leds[led] = red;
+		} else if ((led % NUM_COLOURS) == ORANGE) {
+			previous_ring_led_colours[led] = ORANGE;
+			ring_leds[led] = orange;
+		} else if ((led % NUM_COLOURS) == YELLOW) {
+			previous_ring_led_colours[led] = YELLOW;
+			ring_leds[led] = yellow;
+		} else if ((led % NUM_COLOURS) == GREEN) {
+			previous_ring_led_colours[led] = GREEN;
+			ring_leds[led] = green;
+		} else if ((led % NUM_COLOURS) == LIGHTBLUE) {
+			previous_ring_led_colours[led] = LIGHTBLUE;
+			ring_leds[led] = light_blue;
+		} else if ((led % NUM_COLOURS) == BLUE) {
+			previous_ring_led_colours[led] = BLUE;
+			ring_leds[led] = blue;
+		} else if ((led % NUM_COLOURS) == VIOLET) {
+			previous_ring_led_colours[led] = VIOLET;
+			ring_leds[led] = violet;
+		} else if ((led % NUM_COLOURS) == PINK) {
+			previous_ring_led_colours[led] = PINK;
+			ring_leds[led] = pink;
+		}
+	}
+	ws2812SetLedsPin(ring_leds, NUM_RING_LEDS, _BV(ws2812Pin2));
+	
+	led_counter = 0;
+	current_led_colour = RAINBOW;
+}
+
+// Turn LEDs off
+void turn_leds_off(void) {
+	
+	// Turning strip LEDs off
+	for (int led = 0; led < NUMBER_LEDS; led++) {
+		leds[led] = off;
+	}
+	ws2812SetLeds(leds, NUMBER_LEDS);
+	
+	// Turning ring LEDs off
+	for (int led = 0; led < NUM_RING_LEDS; led++) {
+		ring_leds[led] = off;
+	}
+	ws2812SetLedsPin(ring_leds, NUM_RING_LEDS, _BV(ws2812Pin2));
+
+	led_mode = OFF;
+	current_led_colour = NO_COLOUR;
+}
+
+// Set LEDs to the current colour
+void set_leds(void) {
+	
+	if (led_mode == BOOGIE_SLOW || led_mode == BOOGIE || led_mode == BOOGIE_SLOW) {
+		set_leds_rainbow_boogie();
+	} else {
+		struct cRGB colour_to_be_set = red;
+		switch (current_led_colour) {
+			
+			case ORANGE:
+			colour_to_be_set = orange;
+			break;
+			
+			case YELLOW:
+			colour_to_be_set = yellow;
+			break;
+			
+			case GREEN:
+			colour_to_be_set = green;
+			break;
+			
+			case LIGHTBLUE:
+			colour_to_be_set = light_blue;
+			break;
+			
+			case BLUE:
+			colour_to_be_set = blue;
+			break;
+			
+			case VIOLET:
+			colour_to_be_set = violet;
+			break;
+			
+			case PINK:
+			colour_to_be_set = pink;
+			break;
+			
+			case WHITE:
+			colour_to_be_set = white;
+			break;
+			
+			case RAINBOW:
+			set_leds_rainbow();
+			break;
+		}
 		
-	// Wait until the conversion is complete
-	while(ADCSRA & (1 << ADSC));
-	
-	return ADC;
+		// Setting strip LEDs
+		if (current_led_colour != RAINBOW) {
+			for (int led = 0; led < NUMBER_LEDS; led++) {
+				leds[led] = colour_to_be_set;
+			}
+			ws2812SetLeds(leds, NUMBER_LEDS);
+		}
+		
+		// Setting ring LEDs
+		if (current_led_colour != RAINBOW) {
+			for (int led = 0; led < NUM_RING_LEDS; led++) {
+				ring_leds[led] = colour_to_be_set;
+			}
+			ws2812SetLedsPin(ring_leds, NUM_RING_LEDS, _BV(ws2812Pin2));
+		}
+	}
 }
 
-// Read value from front sensor
-uint16_t get_front_sensor_value(void) {
+// Initialise partyBot
+void init_partyBot(void) {
+
+	// Initialise timers
+	init_timer_1();
+	init_timer_2();
+
+	// Initialise distance sensors
+	init_distance_sensors();
+
+	// Initliase motors
+	init_motor_control();
+
+	// Initialise serial communication
+	init_serial_communication();
+
+	// Set test LED pin as an output
+	TEST_LED_DDR |= (1 << TEST_LED_PIN);
 	
-	// Zero ADMUX bits
+	// Set LED strip pin as an output
+	LED_DDR |= (1 << LED_PIN);
+
+	// Set ring LED pin as an output
+	RING_LED_DDR |= (1 << RING_LED_PIN);
+
+	// Set solenoid pin as an output
+	SOLENOID_DDR |= (1 << SOLENOID_PIN);
+	
+	// Turn LEDs green
+	current_led_colour = GREEN;
+	set_leds();
+	
+	// Set up touch sensor interrupts (PCINT6 and PCINT7)
+	PCMSK0 |= (1 << PCINT7) | (1 << PCINT6);
+	PCICR |= (1 << PCIE0);
+	
+	// Start in auto mode and at mid speed
+	//current_mode = AUTO_MODE;
+	current_mode = MANUAL_MODE;
+	send_serial_char(CHANGE_AUTO_MODE);
+	current_speed = MID_SPEED;
+}
+
+// Read value of given distance sensor
+uint8_t get_distance_sensor_value(int sensor) {
+
+	// Zero ADMUX (lower four) bits
 	ADMUX &= 0xF0;
-	
-	// select ADC3 as ADC input
-	ADMUX |= (0 << MUX3) | (0 << MUX2) |(1 << MUX1) | (1 << MUX0);
-	
-	// Start an ADC conversion by setting ADSC bit (bit 6)
+
+	switch (sensor) {
+		case FRONT_SENSOR:
+			// Select ADC2 as ADC input
+			ADMUX |= (1 << MUX1);
+			break;
+		case REAR_SENSOR: 
+			// Select ADC1 as ADC input
+			ADMUX |= (1 << MUX0);
+			break; 
+		case LEFT_SENSOR: 
+			// Select ADC0 as ADC input - no change required to ADMUX register
+			break;
+		default: 
+			// Select ADC3 as ADC input
+			ADMUX |= (1 << MUX1) | (1 << MUX0);
+			break;
+	}
+
+	// Start an ADC conversion by setting ADSC bit
 	ADCSRA |= (1 << ADSC);
 	
 	// Wait until the conversion is complete
-	while(ADCSRA & (1 << ADSC));
-
-	return ADC;
+	while(ADCSRA & (1 << ADSC)) {}
+		
+	return ADCH;
 }
 
-// Read value from right sensor
-uint16_t get_right_sensor_value(void) {
-	
-	// Zero ADMUX bits
-	ADMUX &= 0xF0;
-	
-	// select ADC0 as ADC input
-	ADMUX |= (0 << MUX3) | (0 << MUX2) |(0 << MUX1) | (0 << MUX0);
-	
-	// Start an ADC conversion by setting ADSC bit (bit 6)
-	ADCSRA |= (1 << ADSC);
-	
-	// Wait until the conversion is complete
-	while(ADCSRA & (1 << ADSC));
-
-	return ADC;
-}
-
-// Read value from left sensor
-uint16_t get_left_sensor_value(void) {
-	
-	// Zero ADMUX bits
-	ADMUX &= 0xF0;
-	
-	// select ADC1 as ADC input
-	ADMUX |= (0 << MUX3) | (0 << MUX2) |(0 << MUX1) | (1 << MUX0);
-	
-	// Start an ADC conversion by setting ADSC bit (bit 6)
-	ADCSRA |= (1 << ADSC);
-	
-	// Wait until the conversion is complete
-	while(ADCSRA & (1 << ADSC));
-	
-	return ADC;
-}
-
-// Turn motors on by setting enable pins to high 
+// Turn motors on according to current speed
 void turn_motors_on(void) {
 
 	if (current_speed == SLOWEST_SPEED) {
-		OCR0A = RIGHT_SLOWEST_SPEED_PWM; 
-		OCR0B = LEFT_SLOWEST_SPEED_PWM;
+		OCR0A = M1_SLOWEST_PWM; 
+		OCR0B = M2_SLOWEST_PWM;
 	} else if (current_speed == SLOW_SPEED) {
-		OCR0A = RIGHT_SLOW_SPEED_PWM;
-		OCR0B = LEFT_SLOW_SPEED_PWM;
+		OCR0A = M1_SLOW_PWM;
+		OCR0B = M2_SLOW_PWM;
 	} else if (current_speed == MID_SPEED) {
-		OCR0A = RIGHT_MID_SPEED_PWM;
-		OCR0B = LEFT_MID_SPEED_PWM;
+		OCR0A = M1_MID_PWM;
+		OCR0B = M2_MID_PWM;
 	} else if (current_speed == FAST_SPEED) {
-		OCR0A = RIGHT_FAST_SPEED_PWM;
-		OCR0B = LEFT_FAST_SPEED_PWM;
+		OCR0A = M1_FAST_PWM;
+		OCR0B = M2_FAST_PWM;
 	} else if (current_speed == FASTEST_SPEED) {
-		OCR0A = RIGHT_FASTEST_SPEED_PWM;
-		OCR0B = LEFT_FASTEST_SPEED_PWM;
+		OCR0A = M1_FASTEST_PWM;
+		OCR0B = M2_FASTEST_PWM;
 	}
-	motors_on = true; 
 }
 
-// Turn motors off by setting enable pins to low
+// Turn motors off by setting motor pins to low
 void turn_motors_off(void) {
 	
 	// Set motor speeds to 0 
@@ -274,408 +508,184 @@ void turn_motors_off(void) {
 	OCR0B = 0;
 	
 	// Set motor pins to low 
-	PORTD &= ~(1 << PIND7); // Set backward motor 1 pin to low
-	PORTD &= ~(1 << PIND6); // Set enable motor 1 pin to low
-	PORTB &= ~(1 << PINB0); // Set forward motor 2 pin to low
-	PORTB &= ~(1 << PINB2); // Set forward motor 1 pin to low
-	PORTD &= ~(1 << PIND4); // Set backward motor 2 pin to low
-	PORTD &= ~(1 << PIND5); // Set enable motor 2 pin to low
+	M1_PORT &= ~(1 << M1_EN_PIN);
+	M1_PORT &= ~(1 << M1_FWD_PIN); 
+	M1_PORT &= ~(1 << M1_BWD_PIN);
+	M2_PORT &= ~(1 << M2_EN_PIN);
+	M2_PORT &= ~(1 << M2_FWD_PIN);  
+	M2_BWD_PORT &= ~(1 << M2_BWD_PIN);
 
-	motors_on = false;
+	movement_mode = STOPPED;
 }
 
 // Move robot forward
 void move_forward() {
-	PORTB |= (1 << PINB2); // Set forward motor 1 pin to high
-	PORTD |= (1 << PIND4); // Set forward motor 2 pin to high 
-	PORTD &= ~(1 << PIND7); // Set backward motor 1 pin to low
-	PORTB &= ~(1 << PINB0); // Set backward motor 2 pin to low
+	M1_PORT |= (1 << M1_FWD_PIN);  // Set forward motor 1 pin to high
+	M2_PORT |= (1 << M2_FWD_PIN);  // Set forward motor 2 pin to high 
+	M1_PORT &= ~(1 << M1_BWD_PIN);  // Set backward motor 1 pin to low
+	M2_BWD_PORT &= ~(1 << M2_BWD_PIN);  // Set backward motor 2 pin to low
+	
+	movement_mode = FORWARD;
 }
 
 // Move robot backwards
 void reverse(void) {
-	PORTD |= (1 << PIND7); // Set backward motor 1 pin to high
-	PORTB |= (1 << PINB0); // Set backward motor 2 pin to high 
-	PORTB &= ~(1 << PINB2); // Set forward motor 1 pin to low
-	PORTD &= ~(1 << PIND4); // Set forward motor 2 pin to low
+	M1_PORT |= (1 << M1_BWD_PIN); // Set backward motor 1 pin to high
+	M2_BWD_PORT |= (1 << M2_BWD_PIN); // Set backward motor 2 pin to high 
+	M1_PORT &= ~(1 << M1_FWD_PIN); // Set forward motor 1 pin to low
+	M2_PORT &= ~(1 << M2_FWD_PIN); // Set forward motor 2 pin to low
+	
+	movement_mode = REVERSING;
 } 
 
 // Turn robot left
 void turn_left(void) {
-	PORTB |= (1 << PINB2); // Set forward motor 1 pin to high
-	PORTD &= ~(1 << PIND4); // Set forward motor 2 pin to low
-	PORTD &= ~(1 << PIND7); // Set backward motor 1 pin to low
-	PORTB |= (1 << PINB0); // Set backward motor 2 pin to high
+	M1_PORT |= (1 << M1_FWD_PIN); // Set forward motor 1 pin to high
+	M2_BWD_PORT |= (1 << M2_BWD_PIN); // Set backward motor 2 pin to high
+	M1_PORT &= ~(1 << M1_BWD_PIN); // Set backward motor 1 pin to low
+	M2_PORT &= ~(1 << M2_FWD_PIN); // Set forward motor 2 pin to low
+	
+	movement_mode = TURNING_L;
 }
 
 // Turn robot right
 void turn_right(void) {
-	PORTB &= ~(1 << PINB2); // Set forward motor 1 pin to low
-	PORTD |= (1 << PIND4); // Set forward motor 2 pin to high
-	PORTD |= (1 << PIND7); // Set backward motor 1 pin to high
-	PORTB &= ~(1 << PINB0); // Set backward motor 2 pin to low
+	M1_PORT |= (1 << M1_BWD_PIN); // Set backward motor 1 pin to high
+	M2_PORT |= (1 << M2_FWD_PIN); // Set forward motor 2 pin to high
+	M1_PORT &= ~(1 << M1_FWD_PIN); // Set forward motor 1 pin to low
+	M2_BWD_PORT &= ~(1 << M2_BWD_PIN); // Set backward motor 2 pin to low
+	
+	movement_mode = TURNING_R;
 }
 
-// Resets auto mode variables when manual mode activated
+// Reset auto mode variables when manual mode activated
 void reset_auto_variables(void) {
-	obstacle_detected = false; 
-	moving_forward = false;
-	stopped = false; 
-	time_to_reverse = false; 
-	reversing = false;
-	time_to_turn = false; 
-	turning_left = false; 
-	turning_right = false; 
-	stopped_counter = 0;
+	movement_mode = STOPPED; 
 	reversing_counter = 0;
-	turning_left_counter = 0; 
-	turning_right_counter = 0; 
+	turning_counter = 0;
+	stopped_counter = 0;
+	forward_mvmt_disabled = false;
+	obstacle_just_detected = false;
 }
 
 // Reset manual steering variables 
 void reset_man_variables(void) {
-	man_moving_forward = false; 
-	man_reversing = false; 
-	man_turning_left = false; 
-	man_turning_right = false; 
-	partyBot_dancing = false; 
+	movement_mode = STOPPED;
 }
 
-// Set LEDs to red
-void set_leds_red(void) {
-	const struct cRGB red = {.r = 15, .g = 0, .b = 0};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = red;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = RED;
-}
-
-// Set LEDs to orange
-void set_leds_orange(void) {
-	const struct cRGB orange = {.r = 20, .g = 4, .b = 0};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = orange;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = ORANGE;
-}
-
-// Set LEDs to yellow
-void set_leds_yellow(void) {
-	const struct cRGB yellow = {.r = 14, .g = 7, .b = 0};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = yellow;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = YELLOW;
-}
-
-// Set LEDs to green
-void set_leds_green(void) {
-	const struct cRGB green = {.r = 0, .g = 15, .b = 0};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = green;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = GREEN;
-}
-
-// Set LEDs light blue 
-void set_leds_light_blue(void) {
-	const struct cRGB light_blue = {.r = 0, .g = 6, .b = 15};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = light_blue;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = LIGHTBLUE;
-}
-
-// Set LEDs to blue
-void set_leds_blue(void) {
-	const struct cRGB blue = {.r = 0, .g = 0, .b = 15};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = blue;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = BLUE;
-}
-
-// Set LEDs to violet
-void set_leds_violet(void) {
-	const struct cRGB violet = {.r = 6, .g = 0, .b = 15};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = violet;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = VIOLET;
-}
-
-// Set LEDs to white
-void set_leds_white(void) {
-	const struct cRGB white = {.r = 15, .g = 15, .b = 15};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = white;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = false;
-	current_colour = WHITE;	
-}
-
-// Set LEDs to rainbow
-void set_leds_rainbow(void) {
-	
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		if ((i % 7) == 0) {
-			const struct cRGB red = {.r = 15, .g = 0, .b = 0};
-			leds[i] = red;
-		} else if ((i % 7) == 1) {
-			const struct cRGB orange = {.r = 20, .g = 4, .b = 0};
-			leds[i] = orange;
-		} else if ((i % 7) == 2) {
-			const struct cRGB yellow = {.r = 14, .g = 7, .b = 0};
-			leds[i] = yellow;
-		} else if ((i % 7) == 3) {
-			const struct cRGB green = {.r = 0, .g = 15, .b = 0};
-			leds[i] = green;
-		} else if ((i % 7) == 4) {
-			const struct cRGB light_blue = {.r = 0, .g = 6, .b = 15};
-			leds[i] = light_blue;
-		} else if ((i % 7) == 5) {
-			const struct cRGB blue = {.r = 0, .g = 0, .b = 15};
-			leds[i] = blue;
-		} else if ((i % 7) == 6) {
-			const struct cRGB violet = {.r = 6, .g = 0, .b = 15};
-			leds[i] = violet;
-		}
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-}
-
-// Set LEDs to move along one spot
-void set_leds_rainbow_boogie(void) {
-	
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		if (previous_colours[i] == RED) {
-			const struct cRGB orange = {.r = 20, .g = 4, .b = 0};
-			leds[i] = orange;
-			previous_colours[i] = ORANGE; 
-		} else if (previous_colours[i] == ORANGE) {
-			const struct cRGB yellow = {.r = 14, .g = 7, .b = 0};
-			leds[i] = yellow;
-			previous_colours[i] = YELLOW; 
-		} else if (previous_colours[i] == YELLOW) {
-			const struct cRGB green = {.r = 0, .g = 15, .b = 0};
-			leds[i] = green;
-			previous_colours[i] = GREEN;
-		} else if (previous_colours[i] == GREEN) {
-			const struct cRGB light_blue = {.r = 0, .g = 6, .b = 15};
-			leds[i] = light_blue;
-			previous_colours[i] = LIGHTBLUE;
-		} else if (previous_colours[i] == LIGHTBLUE) {
-			const struct cRGB blue = {.r = 0, .g = 0, .b = 15};
-			leds[i] = blue;
-			previous_colours[i] = BLUE; 
-		} else if (previous_colours[i] == BLUE) {
-			const struct cRGB violet = {.r = 6, .g = 0, .b = 15};
-			leds[i] = violet;
-			previous_colours[i] = VIOLET;
-		} else if (previous_colours[i] == VIOLET) {
-			const struct cRGB red = {.r = 15, .g = 0, .b = 0};
-			leds[i] = red;
-			previous_colours[i] = RED; 
-		}
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);	
-}
-
-// Reset rainbow boogie colour array 
-void reset_rainbow_boogie_array(void) {
-	
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		if ((i % 7) == 0) {
-			const struct cRGB red = {.r = 15, .g = 0, .b = 0};
-			previous_colours[i] = RED;
-			leds[i] = red;
-		} else if ((i % 7) == 1) {
-			const struct cRGB orange = {.r = 20, .g = 4, .b = 0};
-			previous_colours[i] = ORANGE;
-			leds[i] = orange; 
-		} else if ((i % 7) == 2) {
-			const struct cRGB yellow = {.r = 14, .g = 7, .b = 0};
-			previous_colours[i] = YELLOW;
-			leds[i] = yellow; 
-		} else if ((i % 7) == 3) {
-			const struct cRGB green = {.r = 0, .g = 15, .b = 0};
-			previous_colours[i] = GREEN;
-			leds[i] = green; 
-		} else if ((i % 7) == 4) {
-			const struct cRGB light_blue = {.r = 0, .g = 6, .b = 15};
-			previous_colours[i] = LIGHTBLUE;
-			leds[i] = light_blue; 
-		} else if ((i % 7) == 5) {
-			const struct cRGB blue = {.r = 0, .g = 0, .b = 15};
-			previous_colours[i] = BLUE;
-			leds[i] = blue; 
-		} else if ((i % 7) == 6) {
-			const struct cRGB violet = {.r = 6, .g = 0, .b = 15};
-			previous_colours[i] = VIOLET;
-			leds[i] = violet;
-		}
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	rainbow_boogie = true; 
-	current_colour = RAINBOW; 
-}
-
-// Set LEDs to current colour
-void set_leds(void) {
-	if (current_colour == RED) {
-		set_leds_red();
-	} else if (current_colour == ORANGE) {
-		set_leds_orange();
-	} else if (current_colour == YELLOW) {
-		set_leds_yellow();
-	} else if (current_colour == GREEN) {
-		set_leds_green();
-	} else if (current_colour == LIGHTBLUE) {
-		set_leds_light_blue();
-	} else if (current_colour == BLUE) {
-		set_leds_blue();
-	} else if (current_colour == VIOLET) {
-		set_leds_violet();
-	} else if (current_colour == WHITE) {
-		set_leds_white();
-	} else if (current_colour == RAINBOW) {
-		if (rainbow_boogie) {
-			set_leds_rainbow_boogie(); 
-		} else {
-			set_leds_rainbow();
-		}
-	}
-}
-
-// Turn LEDs off
-void turnLedsOff(void) {
-	
-	const struct cRGB off = {.r = 0, .g = 0, .b = 0};
-	for (int i = 0; i < NUMBER_LEDS; i++) {
-		leds[i] = off;
-	}
-	ws2812SetLeds(leds, NUMBER_LEDS);
-	leds_off = true;
-	slow_flash_leds = false;
-	flash_leds = false;
-	fast_flash_leds = false;
-	rainbow_boogie = false;
-	leds_just_flashed = true;
-	led_counter = 0;
-	rainbow_tracker = 0;
-	current_colour = WHITE;
-}
-
-// Reset partyBot 
-void resetPartyBot(void) {
-	
-	// Reset general variables 
-	current_mode = AUTO_MODE;
-	current_speed = MID_SPEED;
-	motors_on = false;
-	solenoid_counter = 0;
-	fire = false;
-	reset_auto_variables();
-	reset_man_variables(); 
-	turnLedsOff();	
-}
-
-// Interrupt used for firing solenoid and LED control 
+// Interrupt used for firing solenoid, LED control and polling switch pin
 ISR(TIMER1_COMPA_vect) {
-	if (fire) {
+	
+	// Solenoid control
+	if (fire_solenoid) {
+		SOLENOID_PORT |= (1 << SOLENOID_PIN);
 		solenoid_counter++;
-	PORTC |= (1 << PINC4);
-	//PORTC |= (1 << PINC5); // Set solenoid pin to high
-		if (solenoid_counter == 2) {
-			PORTC &= ~(1 << PINC4);
-			//PORTC &= ~(1 << PINC5); // Set solenoid pin to low
+
+		// After set period, reset solenoid
+		if (solenoid_counter >= (SOLENOID_FIRING_PERIOD / TIMER_1_PERIOD)) {
+			SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
 			solenoid_counter = 0;
-			fire = false;
+			fire_solenoid = false;
 		}
 	}
-	led_counter++; 
-	if (slow_flash_leds) {
-		if (led_counter == 4) {
-			led_counter = 0; 
-			if (rainbow_boogie) {
-				set_leds(); 
-			} else if (leds_just_flashed) {
-				leds_just_flashed = false; 
-				const struct cRGB off = {.r = 0, .g = 0, .b = 0};
-				for (int i = 0; i < NUMBER_LEDS; i++) {
-					leds[i] = off;
-				}
-				ws2812SetLeds(leds, NUMBER_LEDS);
-			} else {
-				set_leds(); 
-				leds_just_flashed = true; 
-			}
+	
+	// LED control
+	bool update_leds_flash_mode = false; 
+	bool update_leds_boogie = false; 
+	if ((led_mode == SLOW_FLASH) && (led_counter >= (SLOW_FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_flash_mode = true; 
+	} else if ((led_mode == FLASH) && (led_counter >= (FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_flash_mode = true;
+	} else if ((led_mode == FAST_FLASH) && (led_counter >= (FAST_FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_flash_mode = true;
+	} else if ((led_mode == BOOGIE_SLOW) && (led_counter >= (SLOW_FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_boogie = true; 
+	} else if ((led_mode == BOOGIE) && (led_counter >= (FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_boogie = true;
+	} else if ((led_mode == BOOGIE_FAST) && (led_counter >= (FAST_FLASH_PERIOD / TIMER_1_PERIOD))) {
+		update_leds_boogie = true;
+	}
+	
+	if (update_leds_flash_mode) {
+		if (leds_just_flashed) {
+			turn_leds_off();
+			leds_just_flashed = false;
+		} else {
+			set_leds();
+			leds_just_flashed = true;
 		}
-	} else if (flash_leds) {
-		if (led_counter == 2) {
-			led_counter = 0;
-			if (rainbow_boogie) {
-				set_leds();
-			} else if (leds_just_flashed) {
-				leds_just_flashed = false;
-				const struct cRGB off = {.r = 0, .g = 0, .b = 0};
-				for (int i = 0; i < NUMBER_LEDS; i++) {
-					leds[i] = off;
-				}
-				ws2812SetLeds(leds, NUMBER_LEDS);
-			} else {
-				set_leds();
-				leds_just_flashed = true; 
-			}
-		}
-	} else if (fast_flash_leds) {
-		if (led_counter == 1) {
-			led_counter = 0;
-			if (rainbow_boogie) {
-				set_leds();
-			} else if (leds_just_flashed) {
-				leds_just_flashed = false;
-				const struct cRGB off = {.r = 0, .g = 0, .b = 0};
-				for (int i = 0; i < NUMBER_LEDS; i++) {
-					leds[i] = off;
-				}
-				ws2812SetLeds(leds, NUMBER_LEDS);
-			} else {
-				set_leds();
-				leds_just_flashed = true; 
-			}
-		}
-	} 
+		led_counter = 0;
+		update_leds_flash_mode = false;
+	} else if (update_leds_boogie) {
+		set_leds();
+		led_counter = 0; 
+		update_leds_boogie = false; 
+	} else {
+		led_counter++;
+	}
 	
 	// Polling switch pin
-	if (PIND & (1 << PIND2)) {
-		// Pin D2 is high
-		if (!switchOn) {
-			// Sliding of switch to on position yet to be processed
-			switchOn = true;
-			resetPartyBot(); 
+	if (PINC & (1 << SWITCH_PIN)) {
+		// Switch pin is high / in OFF position
+		partyBot_switched_off = true;
+		cli(); // disable interrupts
+		turn_leds_off(); 
+		turn_motors_off();
+	} else {
+		// Switch pin is low / in ON position - actioned in main loop
+	}
+}
+
+// Interrupt for touch sensor activation
+ISR(PCINT0_vect) {
+	
+	// Check for TS1 press
+	if (PINB & (1 << TS_1_PIN)) {
+		// TS pin is high / TS pressed --> change LED colour
+		if (current_led_colour == NO_COLOUR) {
+			current_led_colour = RED;
+		} else {
+			current_led_colour++;
+		}
+		set_leds();
+		
+		// Set LCD colour to match if in sync
+		if (lcd_in_sync) {
+			send_serial_char(current_led_colour + SET_LCD_WHITE);
 		}
 	} else {
-		// Pin D2 is low
-		if (switchOn) {
-			switchOn = false;
-			resetPartyBot();
+		// TS pin is low
+	}
+	
+	// Check for TS2 press
+	if (PINB & (1 << TS_2_PIN)) {
+		// TS pin is high / TS pressed --> fire solenoid
+		fire_solenoid = true;
+	} else {
+		// TS pin is low
+	}
+}
+
+
+// Check for obstacle in front of partyBot. Returns false if obstacle detected and stops partyBot in this case.
+bool coast_is_clear(void) {
+	uint8_t front_distance_value = get_distance_sensor_value(FRONT_SENSOR);
+	if (front_distance_value < FRONT_SENSOR_THRESHOLD) {
+		return true; 
+	} else {
+		if (movement_mode == FORWARD) {
+			send_serial_char(OBSTACLE_DETECTED);
+			obstacle_just_detected = true; 
+			pre_obstacle_led_mode = led_mode;
+			pre_obstacle_led_colour = current_led_colour;
+			current_led_colour = ORANGE; 
+			set_leds();
+			led_mode = FLASH; 
+			leds_just_flashed = false;
+			led_counter = 0;
 		}
+		turn_motors_off();
+		return false;
 	}
 }
 
@@ -683,454 +693,486 @@ ISR(TIMER1_COMPA_vect) {
 ISR(TIMER2_COMPA_vect) {
 	
 	if (current_mode == AUTO_MODE) {
-		if (!obstacle_detected) {
-			uint16_t front_distance_value = get_front_sensor_value();
-			if (front_distance_value < THRESHOLD_VALUE) {
-				// Turn motors on if off and move forward
-				if (!motors_on) {
-					turn_motors_on();
-				} 
-				if (!moving_forward) {
-					move_forward();
-					moving_forward = true;
-				}
-			} else {
-				obstacle_detected = true;
-				turn_motors_off();
-				stopped = true;
-				moving_forward = false;
+		if (forward_mvmt_disabled == false && coast_is_clear()) {	
+			
+			// Turn motors on if off
+			if (movement_mode == STOPPED  || movement_mode == TIME_TO_REVERSE) {
+				turn_motors_on();
+			} 
+			
+			// Move partyBot forward if not already moving in this direction
+			if (!(movement_mode == FORWARD)) {
+				move_forward();
 			}
 		} else {
-			if (stopped) {
+			if (obstacle_just_detected) {
+				forward_mvmt_disabled = true;  // Only in auto mode
+				obstacle_just_detected = false; 
+			} else if (movement_mode == STOPPED) {
 				stopped_counter++;
-				if (stopped_counter == 7) {
-					stopped = false;
+				if (stopped_counter >= (STOP_PERIOD / TIMER_2_PERIOD)) {
+					movement_mode = TIME_TO_REVERSE;
 					stopped_counter = 0;
-					time_to_reverse = true;
+					led_mode = pre_obstacle_led_mode;
+					leds_just_flashed = false;
+					led_counter = 0;
+					current_led_colour = pre_obstacle_led_colour;
+					set_leds(); 
 				}
-			} else if (time_to_reverse) {
-				uint16_t rear_distance_value = get_rear_sensor_value();
-				if (rear_distance_value < THRESHOLD_VALUE) {
+			} else if (movement_mode == TIME_TO_REVERSE) {
+				// Reverse partyBot if coast is clear
+				uint8_t rear_distance_value = get_distance_sensor_value(REAR_SENSOR);
+				if (rear_distance_value < REAR_SENSOR_THRESHOLD) {
 					// Back up
 					turn_motors_on();
 					reverse();
-					reversing = true;
 				} else {
-					time_to_turn = true;
+					movement_mode = TIME_TO_TURN;
 				}
-				time_to_reverse = false;
-			} else if (reversing) {
-				uint16_t rear_distance_value = get_rear_sensor_value();
-				reversing_counter++;
-				if (rear_distance_value < THRESHOLD_VALUE) {
-					if (reversing_counter == 7) {
-						reversing = false;
+			} else if (movement_mode == REVERSING) {
+				uint8_t rear_distance_value = get_distance_sensor_value(REAR_SENSOR);
+				if (rear_distance_value < REAR_SENSOR_THRESHOLD) {
+					reversing_counter++;
+					if (reversing_counter >= (REVERSE_PERIOD / TIMER_2_PERIOD)) {
+						turn_motors_off();
+						movement_mode = TIME_TO_TURN;
 						reversing_counter = 0;
-						time_to_turn = true;
 					}
 				} else {
-					time_to_turn = true;
-					reversing = false;
+					turn_motors_off();
+					movement_mode = TIME_TO_TURN;
 					reversing_counter = 0;
 				}
-			} else if (time_to_turn) {
-				uint16_t left_distance_value = get_left_sensor_value();
-				uint16_t right_distance_value = get_right_sensor_value();
-				if (left_distance_value <= right_distance_value && left_distance_value < SIDE_THRESHOLD_VALUE) {
+			} else if (movement_mode == TIME_TO_TURN) {
+				// Turn towards the side with the most space (if enough space)
+				uint8_t left_distance_value = get_distance_sensor_value(LEFT_SENSOR);
+				uint8_t right_distance_value = get_distance_sensor_value(RIGHT_SENSOR);
+				if (left_distance_value <= right_distance_value && left_distance_value < SIDE_SENSOR_THRESHOLD) {
+					turn_motors_on();
 					turn_left();
-					turning_left = true;
-				} else if (right_distance_value < SIDE_THRESHOLD_VALUE) {
+				} else if (right_distance_value < SIDE_SENSOR_THRESHOLD) {
+					turn_motors_on();
 					turn_right();
-					turning_right = true;
 				} else {
-					obstacle_detected = false;
+					turn_motors_off();
+					forward_mvmt_disabled = false; 
+					movement_mode = TIME_TO_REVERSE;
 				}
-				time_to_turn = false;
-			} else if (turning_left) {
-				turning_left_counter++;
-				if (turning_left_counter == MAX_TURN_COUNT) {
-					turning_left = false;
-					turning_left_counter = 0;
-					obstacle_detected = false;
+			} else if (movement_mode == TURNING_L) {
+				turning_counter++;
+				if (turning_counter >= (TURNING_PERIOD / TIMER_2_PERIOD)) {
+					turn_motors_off();
+					forward_mvmt_disabled = false;
+					movement_mode = TIME_TO_REVERSE;
+					turning_counter = 0;
 				}
-			} else if (turning_right) {
-				turning_right_counter++;
-				if (turning_right_counter == MAX_TURN_COUNT) {
-					turning_right = false;
-					turning_right_counter = 0;
-					obstacle_detected = false;
+			} else if (movement_mode == TURNING_R) {
+				turning_counter++;
+				if (turning_counter >= (TURNING_PERIOD / TIMER_2_PERIOD)) {
+					turn_motors_off();
+					forward_mvmt_disabled = false;
+					movement_mode = TIME_TO_REVERSE;
+					turning_counter = 0;
 				}
 			}
 		}
 	} else {
-		if (man_moving_forward) {
-			uint16_t front_distance_value = get_front_sensor_value();
-			if (front_distance_value < THRESHOLD_VALUE) {
+		bool stop_partyBot = true; 
+		if (movement_mode == FORWARD) {
+			uint8_t front_distance_value = get_distance_sensor_value(FRONT_SENSOR);
+			if (front_distance_value < FRONT_SENSOR_THRESHOLD) {
 				// Turn motors on if off and move forward
-				if (!motors_on) {
+				if (movement_mode == STOPPED) {
 					turn_motors_on();
 				}
 				move_forward();
+				stop_partyBot = false;
 			}
-		} else if (man_reversing) {
-			uint16_t rear_distance_value = get_rear_sensor_value();
-			if (rear_distance_value < THRESHOLD_VALUE) {
-				if (!motors_on) {
+		} else if (movement_mode == REVERSING) {
+			uint8_t rear_distance_value = get_distance_sensor_value(REAR_SENSOR);
+			if (rear_distance_value < REAR_SENSOR_THRESHOLD) {
+				if (movement_mode == STOPPED) {
 					turn_motors_on();
 				}
 				reverse();
+				stop_partyBot = false;
 			}
-		} else if (man_turning_left) {
-			uint16_t left_distance_value = get_left_sensor_value();
-			if (left_distance_value < SIDE_THRESHOLD_VALUE) {
-				if (!motors_on) {
+		} else if (movement_mode == TURNING_L) {
+			uint8_t left_distance_value = get_distance_sensor_value(LEFT_SENSOR);
+			if (left_distance_value < SIDE_SENSOR_THRESHOLD) {
+				if (movement_mode == STOPPED) {
 					turn_motors_on();
 				}
 				turn_left();
+				stop_partyBot = false;
 			}
-		} else if (man_turning_right) {
-			uint16_t right_distance_value = get_right_sensor_value();
-			if (right_distance_value < SIDE_THRESHOLD_VALUE) {
-				if (!motors_on) {
+		} else if (movement_mode == TURNING_R) {
+			uint8_t right_distance_value = get_distance_sensor_value(RIGHT_SENSOR);
+			if (right_distance_value < SIDE_SENSOR_THRESHOLD) {
+				if (movement_mode == STOPPED) {
 					turn_motors_on();
 				}
 				turn_right();
+				stop_partyBot = false;
 			}
-		} else if (partyBot_dancing) {
-			
+		} 
+
+		if (stop_partyBot) {
+			turn_motors_off();
 		}
 	}
+}
+
+void partyBot_dance_pls() {
+	
+	turn_motors_off(); 
+	
+	// Store current state to restore post dance
+	int previous_led_colour = current_led_colour;
+	turn_leds_off();
+	int previous_speed = current_speed;
+	cli();
+	_delay_ms(2000);
+	
+	// Dance !
+	// Forward + skittle + back + skittle
+	current_led_colour = RED; 
+	set_leds(); 
+	move_forward(); 
+	_delay_ms(500);
+	for (int i = 0; i < 3; i++) {
+		int led_colour = current_led_colour;
+		turn_leds_off();
+		_delay_ms(100);
+		current_led_colour = led_colour++;
+		set_leds();
+		_delay_ms(400);
+	}
+	turn_motors_off();
+	SOLENOID_PORT |= (1 << SOLENOID_PIN);
+	_delay_ms(SOLENOID_FIRING_PERIOD);
+	SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
+	reverse(); 
+	for (int i = 0; i < 4; i++) {
+		int led_colour = current_led_colour;
+		turn_leds_off();
+		_delay_ms(100);
+		current_led_colour++;
+		current_led_colour = led_colour++;
+		set_leds();
+		_delay_ms(400);
+	}
+	turn_motors_off();
+	SOLENOID_PORT |= (1 << SOLENOID_PIN);
+	_delay_ms(SOLENOID_FIRING_PERIOD);
+	SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
+	
+	// Turn with lights
+	current_speed = FAST_SPEED;
+	current_led_colour = RED;
+	set_leds();
+	turn_left(); 
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = RED;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	
+	// Then forward
+	move_forward();
+	current_led_colour = RED;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = RED;
+	set_leds();
+	_delay_ms(500);
+	
+	// Then back 
+	reverse();
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = RED;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	current_led_colour = RED;
+	set_leds();
+	_delay_ms(500);
+	
+	// Then turn the other way
+	turn_leds_off();
+	_delay_ms(200);
+	current_led_colour = GREEN;
+	set_leds();
+	turn_right(); 
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = GREEN;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = GREEN;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = GREEN;
+	set_leds();
+	
+	// Then forward
+	move_forward();
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = GREEN;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	
+	reverse();
+	current_led_colour = GREEN;
+	set_leds();
+	_delay_ms(500);
+	turn_leds_off();
+	_delay_ms(500);
+	current_led_colour = GREEN;
+	set_leds();
+	_delay_ms(500);
+	
+	// Then spin !!
+	turn_leds_off();
+	_delay_ms(200);
+	current_speed = FASTEST_SPEED;
+	turn_left(); 
+	reset_rainbow_boogie_array();
+	set_leds_rainbow_boogie();
+	_delay_ms(300);
+	set_leds_rainbow_boogie();
+	_delay_ms(300);
+	set_leds_rainbow_boogie();
+	_delay_ms(300);
+	set_leds_rainbow_boogie();
+	_delay_ms(300);
+	turn_right(); 
+	set_leds_rainbow_boogie();
+	_delay_ms(200);
+	SOLENOID_PORT |= (1 << SOLENOID_PIN);
+	set_leds_rainbow_boogie();
+	_delay_ms(200);
+	SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
+	set_leds_rainbow_boogie();
+	_delay_ms(200);
+	SOLENOID_PORT |= (1 << SOLENOID_PIN);
+	set_leds_rainbow_boogie();
+	_delay_ms(200);
+	SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
+	set_leds_rainbow_boogie();
+	_delay_ms(200);
+	SOLENOID_PORT |= (1 << SOLENOID_PIN);
+	_delay_ms(200);
+	turn_motors_off();
+	SOLENOID_PORT &= ~(1 << SOLENOID_PIN);
+	
+	// Restore partyBot post dance
+	current_led_colour = previous_led_colour;
+	current_speed = previous_speed;
+	reversing_counter = 0;
+	turning_counter = 0;
+	stopped_counter = 0;
+	forward_mvmt_disabled = false;
+	obstacle_just_detected = false;
+	solenoid_counter = 0;
+	fire_solenoid = false;
+	leds_just_flashed = true;
+	led_counter = 0;
+	reset_rainbow_boogie_array();
+	sei();
 }
 
 // Interrupt handler for receiving UART data.
 ISR(USART_RX_vect) {
 	
 	// Read character
-	char receivedCharacter;
-	receivedCharacter = UDR0;
-	if (receivedCharacter == 85) {
-		// 85 == U
-		partyBot_dancing = false; 
-		if (!man_moving_forward) {
-			man_moving_forward = true;
-		} else {
-			turn_motors_off();
-			man_moving_forward = false;
-		}
-	} else if (receivedCharacter == 76) {
-		// 76 == L
-		partyBot_dancing = false; 
-		if (!man_turning_left) {
-			man_turning_left = true; 
-		} else {
-			turn_motors_off();
-			man_turning_left = false;
-		}
-	} else if (receivedCharacter == 82) {
-		// 82 == R
-		partyBot_dancing = false; 
-		if (!man_turning_right) {
-			man_turning_right = true;
-		} else {
-			turn_motors_off(); 
-			man_turning_right = false; 
-		}
-	} else if (receivedCharacter == 68) {
-		// 68 == D
-		partyBot_dancing = false; 
-		if (!man_reversing) {
-			man_reversing = true; 
-		} else {
-			turn_motors_off();
-			man_reversing = false; 
-		}
-	} else if (receivedCharacter == 65) {
-		// 65 == A
-		if (current_mode == MANUAL_MODE) {
-			reset_man_variables();
-			current_mode = AUTO_MODE;
-		}
-	} else if (receivedCharacter == 77) {
-		// 77 = M
-		if (current_mode == AUTO_MODE) {
-			turn_motors_off();
-			reset_auto_variables(); 
-			current_mode = MANUAL_MODE;
-		}
-	} else if (receivedCharacter == 64) {
-		// 64 = @ (reset steering)
-		reset_man_variables(); 
-	} else if (receivedCharacter == 83) {
-		// 83 = S
-		current_speed = SLOWEST_SPEED; 
-		turn_motors_on();
-	} else if (receivedCharacter == 84) {
-		// 84 = T
-		current_speed = SLOW_SPEED;
-		turn_motors_on();
-	} else if (receivedCharacter == 88) {
-		// 88 = X
-		current_speed = MID_SPEED;
-		turn_motors_on(); 
-	} else if (receivedCharacter == 90) {
-		// Z = 90 
-		current_speed = FAST_SPEED; 
-		turn_motors_on(); 
-	} else if (receivedCharacter == 33) {
-		// ! = 33
-		current_speed = FASTEST_SPEED; 
-		turn_motors_on(); 
-	} else if (receivedCharacter == 70) {
-		// F = 70
-		receivingMessage = true;
-		// Initialise message array 
-		for(int i = 0; i < sizeof(message); i++) {
-			message[i] = 0; // Initialising each element separately
-		}
-		messageLength = 0;
-	} else if (receivedCharacter == 71) {
-		// G = 71
-		fire = true; 
-		solenoid_counter = 0;
-	} else if (receivedCharacter == 66) {
-		// B = 66
-		set_leds_blue();
-		if (rainbow_boogie) {
-			rainbow_boogie = false; 
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		} 
-	} else if (receivedCharacter == 67) {
-		// C = 67
-		// Set LEDs to rainbow 
-		set_leds_rainbow(); 
-		leds_off = false;
-		current_colour = RAINBOW; 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 72) {
-		// H = 72
-		set_leds_green(); 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 78) {
-		// N = 78
-		set_leds_light_blue();  
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 79) {
-		// O = 79
-		set_leds_orange(); 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 81) {
-		// Q = 81
-		set_leds_red();
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 86) {
-		// V = 86
-		set_leds_violet(); 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 87) {
-		// W = 87
-		set_leds_white(); 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 89) {
-		// Y = 89
-		set_leds_yellow(); 
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 69) {
-		// E = 69
-		// Turn LEDs off 
-		const struct cRGB off = {.r = 0, .g = 0, .b = 0};
-		for (int i = 0; i < NUMBER_LEDS; i++) {
-			leds[i] = off;
-		}
-		ws2812SetLeds(leds, NUMBER_LEDS);
-		leds_off = true; 
-		slow_flash_leds = false; 
-		flash_leds = false; 
-		fast_flash_leds = false; 
-		rainbow_boogie = false; 
-	} else if (receivedCharacter == 73) {
-		// I = 73
-		set_leds_white();
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-		}
-	} else if (receivedCharacter == 74) {
-		// J = 74
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-			set_leds_rainbow();
-			leds_off = false;
-			current_colour = RAINBOW;
-		}
-		if (!leds_off) {
-			slow_flash_leds = true;
-			leds_just_flashed = true; 
-		}
-		if (flash_leds) {
-			flash_leds = false; 
-		}
-		if (fast_flash_leds) {
-			fast_flash_leds = false; 
-		}
-		led_counter = 0; 
-	} else if (receivedCharacter == 75) {
-		// K = 75
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-			set_leds_rainbow();
-			leds_off = false;
-			current_colour = RAINBOW;
-		}
-		if (!leds_off) {
-			flash_leds = true;
-			leds_just_flashed = true; 
-		}
-		if (slow_flash_leds) {
-			slow_flash_leds = false;
-		}
-		if (fast_flash_leds) {
-			fast_flash_leds = false;
-		}
-		led_counter = 0; 
-	} else if (receivedCharacter == 80) {
-		// P = 80
-		if (rainbow_boogie) {
-			rainbow_boogie = false;
-			slow_flash_leds = false;
-			flash_leds = false;
-			fast_flash_leds = false;
-			set_leds_rainbow();
-			leds_off = false;
-			current_colour = RAINBOW;
-		}
-		if (!leds_off) {
-			fast_flash_leds = true;
-			leds_just_flashed = true; 
-		}
-		if (slow_flash_leds) {
-			slow_flash_leds = false;
-		}
-		if (flash_leds) {
-			flash_leds = false;
-		}
-		led_counter = 0; 
-	} else if (receivedCharacter == 60) {
-		// 60 = < (slow rainbow boogie) 
-		slow_flash_leds = true;
-		flash_leds = false;
-		fast_flash_leds = false;
-		rainbow_boogie = true;
-		reset_rainbow_boogie_array(); 
-		led_counter = 0; 
-	} else if (receivedCharacter == 63) {
-		// 63 = ? (rainbow boogie)
-		slow_flash_leds = false;
-		flash_leds = true;
-		fast_flash_leds = false;
-		rainbow_boogie = true;
-		reset_rainbow_boogie_array(); 
-		led_counter = 0; 
-	} else if (receivedCharacter == 62) {
-		// 62 = > (fast rainbow boogie)
-		slow_flash_leds = false;
-		flash_leds = false;
-		fast_flash_leds = true;
-		rainbow_boogie = true;
-		reset_rainbow_boogie_array(); 
-		led_counter = 0; 
-	} else if (receivedCharacter == 43) {
-		// 43 = + (stop flash)
-		slow_flash_leds = false;
-		flash_leds = false;
-		fast_flash_leds = false;
-		rainbow_boogie = false;
-		set_leds(); 
-	} else if (receivedCharacter == 46) {
-		// 46 = .
-		reset_man_variables();
-		turnLedsOff();
-		if (partyBot_dancing) {
-			partyBot_dancing = false; 
-		} else {
-			partyBot_dancing = true; 
-		}
+	char receivedChar;
+	receivedChar = UDR0;
+	
+	// Process character
+	// Turn off in sync LED and LCD colour changes with colour commands
+	if ((receivedChar >= TURN_LEDS_OFF && receivedChar <= SET_LEDS_RAINBOW) || 
+			(receivedChar >= SET_LCD_WHITE && receivedChar <= SET_LCD_PURPLE)) {
+		lcd_in_sync = false; 
 	}
+	
+	// Action character
+	if (receivedChar == MOVE_FORWARD && current_mode == MANUAL_MODE) {
+		movement_mode = FORWARD;
+	} else if (receivedChar == REVERSE && current_mode == MANUAL_MODE) {
+		movement_mode = REVERSING;
+	} else if (receivedChar == TURN_LEFT && current_mode == MANUAL_MODE) {
+		movement_mode = TURNING_L;
+	} else if (receivedChar == TURN_RIGHT && current_mode == MANUAL_MODE) {
+		movement_mode = TURNING_R;
+	} else if (receivedChar == CHANGE_AUTO_MODE && current_mode == MANUAL_MODE) {
+		turn_motors_off();
+		reset_auto_variables();
+		current_mode = AUTO_MODE;
+		send_serial_char(CHANGE_AUTO_MODE);
+	} else if (receivedChar == CHANGE_MAN_MODE && current_mode == AUTO_MODE) {
+		turn_motors_off();
+		reset_man_variables(); 
+		current_mode = MANUAL_MODE;
+		send_serial_char(CHANGE_MAN_MODE);
+	} else if (receivedChar == SET_SLOWEST_SPEED) {
+		current_speed = SLOWEST_SPEED; 
+		if (movement_mode != STOPPED) {
+			turn_motors_on();
+		}
+	} else if (receivedChar == SET_SLOW_SPEED) {
+		current_speed = SLOW_SPEED;
+		if (movement_mode != STOPPED) {
+			turn_motors_on();
+		}
+	} else if (receivedChar == SET_MID_SPEED) {
+		current_speed = MID_SPEED;
+		if (movement_mode != STOPPED) {
+			turn_motors_on();
+		}
+	} else if (receivedChar == SET_FAST_SPEED) {
+		current_speed = FAST_SPEED; 
+		if (movement_mode != STOPPED) {
+			turn_motors_on();
+		}
+	} else if (receivedChar == SET_FASTEST_SPEED) {
+		current_speed = FASTEST_SPEED; 
+		if (movement_mode != STOPPED) {
+			turn_motors_on();
+		}
+	} else if (receivedChar == LCD_MSG_INCOMING) {
+		receiving_message = true;
+		// Initialise message array 
+		for(int char_pos = 0; char_pos < sizeof(message); char_pos++) {
+			message[char_pos] = 0;
+		}
+		message_length = 0;
+	} else if (receivedChar == FIRE_SOLENOID) {
+		fire_solenoid = true; 
+		solenoid_counter = 0;
+	} else if (receivedChar == SET_LEDS_RED) {
+		current_led_colour = RED;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_ORANGE) {
+		current_led_colour = ORANGE;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_YELLOW) {
+		current_led_colour = YELLOW;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_GREEN) {
+		current_led_colour = GREEN;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_BLUE) {
+		current_led_colour = BLUE;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_LIGHTBLUE) {
+		current_led_colour = LIGHTBLUE;
+		set_leds(); 
+	}  else if (receivedChar == SET_LEDS_VIOLET) {
+		current_led_colour = VIOLET;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_PINK) {
+		current_led_colour = PINK;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_WHITE) {
+		current_led_colour = WHITE;
+		set_leds();
+	} else if (receivedChar == SET_LEDS_RAINBOW) {
+		current_led_colour = RAINBOW;
+		set_leds();
+	} else if (receivedChar == TURN_LEDS_OFF) {
+		turn_leds_off();
+	} else if (receivedChar == SET_SLOW_FLASH || receivedChar == SET_FLASH || receivedChar == SET_FAST_FLASH) {
+		if (led_mode == BOOGIE_SLOW || led_mode == BOOGIE || led_mode == BOOGIE_FAST) {
+			set_leds_rainbow();
+		}
+		if (led_mode != OFF) {
+			switch (receivedChar) {
+				case SET_SLOW_FLASH:
+					led_mode = SLOW_FLASH;
+					leds_just_flashed = false;
+					led_counter = 0;
+					break; 
+				case SET_FLASH: 
+					led_mode = FLASH;
+					leds_just_flashed = false;
+					led_counter = 0;
+					break;
+				case SET_FAST_FLASH: 
+					led_mode = FAST_FLASH;
+					leds_just_flashed = false;
+					led_counter = 0;
+					break;
+			}
+			leds_just_flashed = true; 
+			led_counter = 0;
+		}
+	} else if (receivedChar == SET_SLOW_BOOGIE) {
+		reset_rainbow_boogie_array(); 
+		led_mode = BOOGIE_SLOW;
+	} else if (receivedChar == SET_BOOGIE) {
+		reset_rainbow_boogie_array();
+		led_mode = BOOGIE;
+	} else if (receivedChar == SET_FAST_BOOGIE) {
+		reset_rainbow_boogie_array(); 
+		led_mode = BOOGIE_FAST;
+	} else if (receivedChar == STOP_FLASH) {
+		if (current_mode != OFF) {
+			led_mode = NO_FLASH;
+			set_leds();
+		}
+	} else if (receivedChar == PARTYBOT_DANCE) {
+		partyBot_dance_pls();
+	} else if (receivedChar >= SET_LCD_WHITE && receivedChar <= SET_LCD_PURPLE) {
+		send_serial_char(receivedChar);	
+	} else if (receivedChar == PARTYBOT_STOP) {
+		turn_motors_off();
+	} else if (receivedChar == PARTYBOT_OFF_CODE) {
+		turn_leds_off();
+		turn_motors_off();
+		reset_man_variables();
+		current_mode = MANUAL_MODE;
+		send_serial_char(CHANGE_MAN_MODE);
+	} else if (receivedChar == PARTYBOT_ON_CODE) {
+		reset_auto_variables();
+		reset_man_variables();
+		init_partyBot();
+	} else if (receivedChar == BLUETOOTH_TEST) {
+		send_serial_char(BLUETOOTH_TEST);
+		if (current_mode == AUTO_MODE) {
+			send_serial_char(CHANGE_AUTO_MODE);
+		} else {
+			send_serial_char(CHANGE_MAN_MODE);
+		}
+	} 
 }
 
 int main(void) {
 	
-	// Set-up distance sensors, timer 1, timer 2 and motors
-	setup_distance_sensors(); 
-	setup_motor_control(); 
-	initialise_timer_1(); 
-	initialise_timer_2(); 
+	// Initialise partyBot
+	init_partyBot(); 
 	
-	// Initialise serial communication
-	initialise_serial_communication();
-	
-	// TEST
-	DDRD |= (1 << DDD3); 
-		
-	// Set pin B1 to be an output for LEDs
-	DDRB |= (1 << DDB1);
-	
-	// Set pin C4 to be an output for solenoid control
-	//DDRC |= (1 << DDC5); 
-	DDRC |= (1 << DDC4); 
-	
-	// Set pin D2 to be an input for switch 
-	DDRD &= ~(1 << DDD2); 
-	
-    while (1) {		
+    while (1) {
+		// Check if partyBot switched back on (if off) 
+		if (partyBot_switched_off && ((PINC & (1 << SWITCH_PIN)) == 0)) {
+			_delay_ms(250);
+			init_partyBot();
+			reset_auto_variables();
+			reset_man_variables();
+			partyBot_switched_off = false;
+		}
     }
 }

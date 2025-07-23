@@ -37,7 +37,8 @@
 #endif
 
 #if !defined(ws2812Pin)
-#define ws2812Pin  1 // Set data out pin for LED.
+#define ws2812Pin  1 // Set data out pin for LED strip
+#define ws2812Pin2 2 // Set data out pin for LED rings
 #endif
 
 /*
