@@ -25,11 +25,8 @@ void init_serial_communication(void)  {
     // Set frame format to 8N1 (8 data bits, 1 stop bit)
     UCSR0C = 0x06;
 
-    // Enable transmitter and receiver
-    UCSR0B = (1 << TXEN0) | (1 << RXEN0);
-	
-    // Enable receive interrupt
-    UCSR0B |= (1 << RXCIE0);
+    // Enable transmitter, receiver, and receive interrupt atomically
+    UCSR0B = (1 << TXEN0) | (1 << RXEN0) | (1 << RXCIE0);
 }
 
 // Send given data via serial communication.

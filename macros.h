@@ -149,7 +149,7 @@
 
 /* Serial Communication Macros */
 #define BAUD_RATE      9600 // in bps
-#define BAUD_PRESCALER F_CPU / 16 / BAUD_RATE - 1
+#define BAUD_PRESCALER ((F_CPU) / 16 / (BAUD_RATE) - 1)
 
 // Remote Message Codes
 #define TURN_LEDS_OFF      0

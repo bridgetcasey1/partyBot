@@ -88,9 +88,8 @@ void initialise_LCD(void) {
 	// Set colour white 
 	set_RGB(255, 255, 255);
 	
-	// Set curser to (0,0)
-	uint8_t to_send = (0 == 0 ? 0|0x80 : 0|0xC0);
-	i2c_write(LCD_ADDRESS, to_send);
+	// Set cursor to (0,0)
+	send_command(0x80);
 	
 	// Display PartyBot on LCD
 	send_string("PartyBot");
